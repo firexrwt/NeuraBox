@@ -1,50 +1,34 @@
 import os
 import logging
-
 import GPUtil
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from backend.model_manager import ModelManager
-from llama_cpp import Llama
 from typing import Dict, Optional, List
 import uuid
 from dotenv import load_dotenv
 import sqlite3
 import datetime
-
 import platformdirs
+import httpx
 
 from backend.model_manager import ModelManager
-
-# --- Конец проверки импорта ---
-
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
 APP_NAME = "NeuraBox"
 APP_AUTHOR = "NeuraBoxTeam"
-
-# Получаем папку данных пользователя (%APPDATA%\NeuraBox)
 USER_DATA_DIR = platformdirs.user_data_dir(APP_NAME, APP_AUTHOR)
-
-# Создаем эту папку и любые родительские папки, если их нет
 try:
     os.makedirs(USER_DATA_DIR, exist_ok=True)
     logger.info(f"Используется папка данных пользователя: {USER_DATA_DIR}")
 except OSError as e:
     logger.error(f"Не удалось создать папку данных пользователя {USER_DATA_DIR}: {e}")
-    # Возможно, стоит выбросить исключение или завершить работу, если папка критична
-    raise  # Передаем ошибку дальше
-
-
+    raise
 ENV_PATH = os.path.join(USER_DATA_DIR, ".env")
 DATABASE_PATH = os.path.join(USER_DATA_DIR, "neurabox_chats.db")
-
 logger.info(f"Ожидаемый путь к .env файлу: {ENV_PATH}")
 logger.info(f"Ожидаемый путь к базе данных: {DATABASE_PATH}")
-
 dotenv_loaded = load_dotenv(dotenv_path=ENV_PATH)
 if dotenv_loaded:
     logger.info(f".env файл успешно загружен из {ENV_PATH}")
@@ -53,63 +37,97 @@ else:
 
 
 def init_db():
-    """Инициализирует БД и создает таблицы, если их нет."""
     try:
         conn = sqlite3.connect(DATABASE_PATH)
         cursor = conn.cursor()
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS chats (
-                chat_id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                model_used TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_modified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
+                       CREATE TABLE IF NOT EXISTS chats
+                       (
+                           chat_id
+                           TEXT
+                           PRIMARY
+                           KEY,
+                           title
+                           TEXT
+                           NOT
+                           NULL,
+                           model_used
+                           TEXT,
+                           created_at
+                           TIMESTAMP
+                           DEFAULT
+                           CURRENT_TIMESTAMP,
+                           last_modified_at
+                           TIMESTAMP
+                           DEFAULT
+                           CURRENT_TIMESTAMP
+                       );
+                       """)
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                message_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id TEXT NOT NULL,
-                sender TEXT NOT NULL CHECK(sender IN ('user', 'ai')), -- 'user' or 'ai'
-                content TEXT NOT NULL,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (chat_id) REFERENCES chats (chat_id) ON DELETE CASCADE
-            );
-        """)
+                       CREATE TABLE IF NOT EXISTS messages
+                       (
+                           message_id
+                           INTEGER
+                           PRIMARY
+                           KEY
+                           AUTOINCREMENT,
+                           chat_id
+                           TEXT
+                           NOT
+                           NULL,
+                           sender
+                           TEXT
+                           NOT
+                           NULL
+                           CHECK (
+                           sender
+                           IN
+                       (
+                           'user',
+                           'ai'
+                       )),
+                           content TEXT NOT NULL,
+                           timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                           FOREIGN KEY
+                       (
+                           chat_id
+                       ) REFERENCES chats
+                       (
+                           chat_id
+                       ) ON DELETE CASCADE
+                           );
+                       """)
         cursor.execute("""
-            CREATE TRIGGER IF NOT EXISTS update_chat_modtime
+                       CREATE TRIGGER IF NOT EXISTS update_chat_modtime
             AFTER INSERT ON messages
             FOR EACH ROW
-            BEGIN
-                UPDATE chats SET last_modified_at = CURRENT_TIMESTAMP WHERE chat_id = NEW.chat_id;
-            END;
-        """)
+                       BEGIN
+                       UPDATE chats
+                       SET last_modified_at = CURRENT_TIMESTAMP
+                       WHERE chat_id = NEW.chat_id;
+                       END;
+                       """)
         conn.commit()
         logger.info(f"База данных инициализирована: {DATABASE_PATH}")
     except sqlite3.Error as e:
         logger.error(f"Ошибка инициализации БД ({DATABASE_PATH}): {e}")
         raise
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 
-# Инициализация БД при запуске
 init_db()
 
 
 def get_db_connection():
-    """Устанавливает соединение с БД."""
     try:
         conn = sqlite3.connect(DATABASE_PATH)
-        conn.row_factory = sqlite3.Row  # Возвращать строки как словари
+        conn.row_factory = sqlite3.Row
         return conn
     except sqlite3.Error as e:
         logger.error(f"Ошибка подключения к БД ({DATABASE_PATH}): {e}")
         raise HTTPException(status_code=500, detail="Ошибка подключения к базе данных.")
 
-
-# --- Хелперы для работы с БД ---
 
 def db_add_chat(chat_id: str, title: str, model_used: Optional[str] = None):
     conn = get_db_connection()
@@ -128,38 +146,28 @@ def db_add_chat(chat_id: str, title: str, model_used: Optional[str] = None):
         conn.rollback()
         raise HTTPException(status_code=500, detail="Ошибка сохранения чата в БД.")
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 
 def db_add_message(chat_id: str, sender: str, content: str):
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO messages (chat_id, sender, content) VALUES (?, ?, ?)",
-            (chat_id, sender, content)
-        )
-        # Обновляем название чата первым сообщением пользователя, если оно стандартное
-        # Проверяем, есть ли уже сообщения от пользователя в этом чате
+        cursor.execute("INSERT INTO messages (chat_id, sender, content) VALUES (?, ?, ?)", (chat_id, sender, content))
         cursor.execute("SELECT COUNT(*) FROM messages WHERE chat_id = ? AND sender = 'user'", (chat_id,))
         user_message_count = cursor.fetchone()[0]
-
-        if user_message_count == 1 and sender == 'user':  # Если это первое сообщение пользователя
+        if user_message_count == 1 and sender == 'user':
             cursor.execute("UPDATE chats SET title = ? WHERE chat_id = ? AND title LIKE 'New Chat %'",
                            (content[:50], chat_id))
             logger.info(f"Название чата {chat_id} обновлено на: {content[:50]}")
-
         conn.commit()
         logger.info(f"Сообщение от '{sender}' добавлено в чат {chat_id}.")
     except sqlite3.Error as e:
         logger.error(f"Ошибка добавления сообщения в чат {chat_id}: {e}")
         conn.rollback()
-        # Важно решить, должен ли запрос /query завершиться ошибкой, если сообщение не сохранилось
         raise HTTPException(status_code=500, detail="Ошибка сохранения сообщения в БД.")
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 
 def db_get_chats() -> List[Dict]:
@@ -168,41 +176,40 @@ def db_get_chats() -> List[Dict]:
         cursor = conn.cursor()
         cursor.execute("SELECT chat_id, title, model_used, last_modified_at FROM chats ORDER BY last_modified_at DESC")
         chats = [dict(row) for row in cursor.fetchall()]
+        for chat in chats:
+            if isinstance(chat.get('last_modified_at'), str):
+                chat['last_modified_at'] = datetime.datetime.fromisoformat(chat['last_modified_at'])
         return chats
     except sqlite3.Error as e:
         logger.error(f"Ошибка получения чатов из БД: {e}")
         raise HTTPException(status_code=500, detail="Ошибка чтения списка чатов.")
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 
 def db_get_messages(chat_id: str) -> List[Dict]:
     conn = get_db_connection()
-    # Сначала проверим, существует ли чат
     cursor = conn.cursor()
     cursor.execute("SELECT chat_id FROM chats WHERE chat_id = ?", (chat_id,))
     chat_exists = cursor.fetchone()
-
     if not chat_exists:
         conn.close()
         logger.warning(f"Попытка получить сообщения для несуществующего чата: {chat_id}")
-        # Возвращаем None или пустой список, чтобы вызывающий код мог обработать 404
         return None
-
     try:
         cursor.execute(
             "SELECT message_id, sender, content, timestamp FROM messages WHERE chat_id = ? ORDER BY timestamp ASC",
-            (chat_id,)
-        )
-        messages = [dict(row) for row in cursor.fetchall()]
-        return messages
+            (chat_id,))
+        messages_data = [dict(row) for row in cursor.fetchall()]
+        for msg in messages_data:
+            if isinstance(msg.get('timestamp'), str):
+                msg['timestamp'] = datetime.datetime.fromisoformat(msg['timestamp'])
+        return messages_data
     except sqlite3.Error as e:
         logger.error(f"Ошибка получения сообщений для чата {chat_id}: {e}")
         raise HTTPException(status_code=500, detail="Ошибка чтения сообщений чата.")
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 
 def db_delete_chat(chat_id: str) -> bool:
@@ -223,11 +230,8 @@ def db_delete_chat(chat_id: str) -> bool:
         conn.rollback()
         raise HTTPException(status_code=500, detail="Ошибка удаления чата.")
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
-
-# --- Существующий код API (с изменениями) ---
 
 router = APIRouter()
 
@@ -235,54 +239,17 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 if not HF_TOKEN:
     logger.warning("HF_TOKEN не задан в .env или окружении.")
 
-model_manager = None  # Инициализируем при первом запросе, требующем токен
-llm_instance = None
-# Убрали: conversation_histories: Dict[str, deque] = {}
+model_manager = None
 
 global_model_settings = {
-    "max_tokens": 1024,  # Увеличим по умолчанию
+    "max_tokens": 1024,
     "temperature": 0.7,
-    "top_p": 0.95  # Немного увеличим
+    "top_p": 0.95
 }
 
 
-# Pydantic модели
 class TokenRequestBody(BaseModel):
     token: str
-
-
-def get_gpu_layers():
-    try:
-        gpus = GPUtil.getGPUs()
-        if not gpus:
-            logger.info("GPU не найдено — будет использован CPU.")
-            return 0
-
-        gpu0 = gpus[0]
-        total_mem = gpu0.memoryTotal  # в МБ
-        logger.info(f"Найден GPU: {gpu0.name}, память: {total_mem / 1024:.1f} GB")
-
-        if total_mem >= 22000:
-            logger.info("Установлено: все слои модели на GPU (n_gpu_layers = -1)")
-            return -1
-        elif total_mem >= 15000:
-            logger.info("Установлено: 40 слоёв на GPU")
-            return 40
-        elif total_mem >= 10000:
-            logger.info("Установлено: 30 слоёв на GPU")
-            return 30
-        elif total_mem >= 7000:
-            logger.info("Установлено: 20 слоёв на GPU")
-            return 20
-        elif total_mem >= 5000:
-            logger.info("Установлено: 15 слоёв на GPU")
-            return 15
-        else:
-            logger.info("Установлено: 10 слоёв на GPU")
-            return 10
-    except Exception as e:
-        logger.warning(f"Ошибка при определении GPU: {e} — будет использован CPU.")
-        return 0
 
 
 class ModelRequestBody(BaseModel):
@@ -295,59 +262,41 @@ class ModelSettingsRequestBody(BaseModel):
     top_p: float = Field(default=global_model_settings["top_p"], ge=0.0, le=1.0)
 
 
-class QueryRequestBody(ModelSettingsRequestBody):  # Настройки можно переопределять в запросе
+class QueryRequestBody(ModelSettingsRequestBody):
     text: str
     model: str
-    chat_id: str  # ID чата теперь обязателен от фронтенда
-    use_internet: bool = False  # Оставляем, если используется
+    chat_id: str
+    use_internet: bool = False
 
 
-def load_model(model_name: str):
-    global llm_instance, model_manager
-    if model_manager is None:
-        logger.error("ModelManager не инициализирован перед загрузкой модели!")
-        raise HTTPException(status_code=500, detail="Менеджер моделей не готов.")
+def get_gpu_layers():
     try:
-        model_path = model_manager.get_model_path(model_name)
-        if not model_path or not os.path.exists(model_path):
-            logger.error(f"Путь к модели не найден или не существует: {model_path} для {model_name}")
-            raise HTTPException(status_code=404, detail=f"Файл модели {model_name} не найден. Установите ее.")
-
-        gpu_layers = get_gpu_layers()
-        n_ctx = 4096
-        logger.info(f"Загрузка модели: {model_name} (Путь: {model_path})")
-        logger.info(f"Параметры Llama: n_ctx={n_ctx}, n_gpu_layers={gpu_layers}")
-
-        # Освобождаем ресурсы предыдущей модели
-        if llm_instance:
-            logger.info("Освобождаем ресурсы предыдущей модели...")
-            del llm_instance
-            llm_instance = None
-            logger.info("Ресурсы освобождены.")
-
-        llm_instance = Llama(
-            model_path=model_path,
-            n_ctx=n_ctx,
-            n_threads=os.cpu_count() // 2,
-            n_gpu_layers=gpu_layers,
-            use_mmap=True,
-            use_mlock=False,
-            verbose=False
-        )
-        logger.info(f"Модель {model_name} успешно загружена.")
+        gpus = GPUtil.getGPUs()
+        if not gpus: logger.info("GPU не найдено."); return 0
+        gpu0 = gpus[0]
+        total_mem = gpu0.memoryTotal
+        logger.info(f"Найден GPU: {gpu0.name}, память: {total_mem / 1024:.1f} GB")
+        if total_mem >= 22000:
+            return -1
+        elif total_mem >= 15000:
+            return 40
+        elif total_mem >= 10000:
+            return 30
+        elif total_mem >= 7000:
+            return 20
+        elif total_mem >= 5000:
+            return 15
+        else:
+            return 10
     except Exception as e:
-        logger.exception(
-            f"Поймано исключение при загрузке модели: Model={model_name}, Type={type(e).__name__}, Error={e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка загрузки модели: {str(e)}")
+        logger.warning(f"Ошибка при определении GPU: {e}");
+        return 0
 
-
-# --- Существующие эндпоинты (некоторые с изменениями) ---
 
 @router.get("/models")
 async def list_available_models(request: Request):
     global model_manager
     hf_token = request.headers.get("X-HF-Token", HF_TOKEN)
-    # Инициализируем или обновляем менеджер, если токен изменился
     if model_manager is None or model_manager.hf_token != hf_token:
         logger.info(f"Инициализация ModelManager с токеном {'(есть)' if hf_token else '(нет)'}")
         try:
@@ -382,10 +331,17 @@ async def update_model_settings(request: ModelSettingsRequestBody):
     global global_model_settings
     try:
         settings_changed = False
-        for key, value in request.dict().items():
-            if global_model_settings.get(key) != value:
+        # Используем Pydantic V2+ model_dump или V1 dict()
+        try:
+            update_data = request.model_dump(exclude_unset=True)
+        except AttributeError:  # Fallback for Pydantic V1
+            update_data = request.dict(exclude_unset=True)
+
+        for key, value in update_data.items():
+            if key in global_model_settings and global_model_settings[key] != value:
                 global_model_settings[key] = value
                 settings_changed = True
+
         if settings_changed:
             logger.info(f"Глобальные настройки генерации обновлены: {global_model_settings}")
             return {"message": "Настройки модели обновлены", "settings": global_model_settings}
@@ -399,70 +355,32 @@ async def update_model_settings(request: ModelSettingsRequestBody):
 
 @router.post("/query")
 async def process_query(request: QueryRequestBody):
-    global llm_instance, global_model_settings, model_manager
+    global global_model_settings
 
-    logger.info(f"Запрос к /query для chat_id: {request.chat_id}, модель: {request.model}")
+    logger.info(f"Запрос к /query для chat_id: {request.chat_id}, модель (ожидается на сервере): {request.model}")
 
-    if model_manager is None:
-        logger.error("Попытка выполнить /query до инициализации ModelManager.")
-        raise HTTPException(status_code=500, detail="Сервер не готов, менеджер моделей не инициализирован.")
-
-    # --- Проверка и загрузка модели ---
-    try:
-        model_path = model_manager.get_model_path(request.model)
-        if not model_path or not os.path.exists(model_path):
-            logger.warning(f"Модель {request.model} не найдена локально.")
-            raise HTTPException(status_code=404, detail=f"Модель {request.model} не установлена.")
-
-        # Проверяем, загружена ли нужная модель
-        if not llm_instance or llm_instance.model_path != model_path:
-            logger.info(f"Требуется загрузка/перезагрузка модели {request.model}...")
-            load_model(request.model)
-        else:
-            logger.info(f"Модель {request.model} уже загружена.")
-
-    except HTTPException as http_exc:
-        raise http_exc  # Передаем ошибки 404 и 500 от load_model/get_model_path
-    except Exception as e:
-        logger.exception(f"Неожиданная ошибка при проверке/загрузке модели: {e}")
-        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при подготовке модели.")
-
-    # --- Сохранение сообщения пользователя ---
     user_text = request.text.strip()
     if not user_text:
         raise HTTPException(status_code=400, detail="Текст запроса не может быть пустым.")
-
     try:
         db_add_message(request.chat_id, 'user', user_text)
     except HTTPException as db_exc:
-        # Если сохранение в БД не удалось, прерываем запрос
         logger.error(f"Не удалось сохранить сообщение пользователя для чата {request.chat_id}. Запрос прерван.")
         raise db_exc
     except Exception as e:
         logger.exception(f"Неожиданная ошибка сохранения сообщения пользователя: {e}")
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при сохранении запроса.")
 
-    # --- Формирование промпта с историей из БД ---
     try:
         messages_from_db = db_get_messages(request.chat_id)
-        if messages_from_db is None:  # Проверка, что чат существует (db_get_messages вернет None)
+        if messages_from_db is None:
             logger.error(f"Чат {request.chat_id} не найден при попытке сформировать историю.")
             raise HTTPException(status_code=404, detail=f"Чат с ID {request.chat_id} не найден.")
 
-        # Ограничиваем историю для контекста (например, последние 15 пар сообщений)
         history_limit_pairs = 15
         relevant_history = messages_from_db[-(history_limit_pairs * 2):]
 
-        history_text_parts = []
-        for msg in relevant_history:
-            # Используем 'User' и 'Assistant' как стандартные роли для промпта
-            sender_prefix = "User" if msg['sender'] == 'user' else "Assistant"
-            history_text_parts.append(f"{sender_prefix}: {msg['content']}")
-
-        # Собираем историю. Последнее сообщение пользователя уже включено.
-        history_text = "\n".join(history_text_parts)
-
-        # Системный промпт можно вынести в настройки или константы
+        messages_for_api = []
         system_prompt = """You are NeuraBox, a helpful AI assistant running locally.
         Answer concisely and factually in the same language as the user's last message.
         **Format your response using GitHub Flavored Markdown (GFM).**
@@ -470,44 +388,67 @@ async def process_query(request: QueryRequestBody):
         - Use `inline_code` for inline code.
         - Use **bold** and *italic* text for emphasis.
         - Use lists (`- item` or `1. item`) where appropriate."""
-        prompt = f"{system_prompt}\n\nConversation history:\n{history_text}\n\nAssistant:"
+        messages_for_api.append({"role": "system", "content": system_prompt})
 
-        logger.info(f"Промпт для модели (Chat ID: {request.chat_id}, длина: {len(prompt)}):\n{prompt[:300]}...")
+        for msg in relevant_history:
+            api_role = "user" if msg['sender'] == 'user' else "assistant"
+            messages_for_api.append({"role": api_role, "content": msg['content']})
 
-        # Используем настройки из запроса или глобальные
         max_tokens = request.max_tokens if request.max_tokens is not None else global_model_settings["max_tokens"]
         temperature = request.temperature if request.temperature is not None else global_model_settings["temperature"]
         top_p = request.top_p if request.top_p is not None else global_model_settings["top_p"]
+        stop_sequences = ["\nUser:", "\nAssistant:", "<|endoftext|>"]
 
-        # --- Генерация ответа ---
-        logger.info(f"Параметры генерации: max_tokens={max_tokens}, temp={temperature}, top_p={top_p}")
-        response = llm_instance(
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            echo=False,
-            stop=["\nUser:", "\nAssistant:", "<|endoftext|>"]  # Добавим стандартные стоп-токены
-        )
+        llama_server_url = "http://127.0.0.1:9016/v1/chat/completions"
+        payload = {
+            "model": request.model,
+            "messages": messages_for_api,
+            "temperature": max(0.01, temperature),
+            "max_tokens": max_tokens,
+            "top_p": top_p,
+            "stop": stop_sequences,
+        }
+        logger.info(f"Отправка запроса к llama-server: {llama_server_url}")
 
-        model_response = response["choices"][0]["text"].strip()
-        usage = response.get("usage", {})  # usage может отсутствовать
-        tokens_used = usage.get("total_tokens", 0)
+        model_response = None
+        tokens_used = 0
+
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            try:
+                response = await client.post(llama_server_url, json=payload)
+                logger.info(f"Ответ от llama-server получен: Status={response.status_code}")
+                response.raise_for_status()
+                api_response_data = response.json()
+
+                if api_response_data.get("choices") and len(api_response_data["choices"]) > 0:
+                    message_content = api_response_data["choices"][0].get("message", {}).get("content")
+                    if message_content:
+                        model_response = message_content.strip()
+                usage = api_response_data.get("usage", {})
+                tokens_used = usage.get("total_tokens", 0)
+
+            except httpx.RequestError as exc:
+                logger.error(f"Ошибка сети при запросе к llama-server: {exc}")
+                raise HTTPException(status_code=503, detail=f"Ошибка соединения с сервером модели: {exc}")
+            except httpx.HTTPStatusError as exc:
+                logger.error(f"Ошибка HTTP от llama-server ({exc.response.status_code}): {exc.response.text}")
+                raise HTTPException(status_code=exc.response.status_code,
+                                    detail=f"Сервер модели ({exc.response.status_code}): {exc.response.text[:200]}")
+            except Exception as exc:
+                logger.exception(f"Ошибка обработки ответа от llama-server: {exc}")
+                raise HTTPException(status_code=500, detail=f"Ошибка обработки ответа сервера модели: {str(exc)}")
 
         logger.info(
-            f"Ответ модели получен (Chat ID: {request.chat_id}, токены: {tokens_used}):\n{model_response[:300]}...")
+            f"Ответ модели обработан (Chat ID: {request.chat_id}, токены: {tokens_used}):\n{model_response[:300]}...")
 
         if not model_response:
-            logger.warning(f"Модель вернула пустой ответ для чата {request.chat_id}.")
-            model_response = "(Модель не смогла сгенерировать ответ)"  # Сообщение об ошибке
+            logger.warning(f"Сервер модели вернул пустой ответ для чата {request.chat_id}.")
+            model_response = "(Сервер модели не смог сгенерировать ответ)"
 
-        # --- Сохранение ответа ИИ ---
         try:
             db_add_message(request.chat_id, 'ai', model_response)
         except HTTPException as db_exc:
-            # Если не удалось сохранить ответ ИИ, логируем, но все равно возвращаем ответ пользователю
             logger.error(f"Не удалось сохранить ответ ИИ для чата {request.chat_id}: {db_exc.detail}")
-            # Не прерываем запрос, но можно добавить флаг в ответ, что сохранение не удалось
         except Exception as e:
             logger.exception(f"Неожиданная ошибка сохранения ответа ИИ: {e}")
 
@@ -524,72 +465,51 @@ async def process_query(request: QueryRequestBody):
         }
 
     except HTTPException as http_exc:
-        raise http_exc  # Передаем 404, 500 и другие ошибки дальше
+        raise http_exc
     except Exception as e:
         logger.exception(f"Критическая ошибка обработки /query для чата {request.chat_id}: {e}")
-        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при обработке запроса.")
+        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при обработке запроса: {str(e)}")
 
 
 @router.post("/save_token")
 async def save_token(request: TokenRequestBody):
-    # Логика сохранения токена остается прежней, но убедимся, что ENV_PATH верный
     try:
         current_token = os.getenv("HF_TOKEN")
         new_token = request.token.strip()
-
-        if current_token == new_token:
-            logger.info("Предоставленный токен совпадает с текущим, обновление не требуется.")
-            return {"message": "Токен совпадает с текущим"}
-
-        env_file_path = ENV_PATH  # Используем определенный ранее путь
+        if current_token == new_token: return {"message": "Токен совпадает с текущим"}
+        env_file_path = ENV_PATH
         lines = []
         token_found = False
-
-        # Читаем существующий .env, если он есть
         if os.path.exists(env_file_path):
             try:
                 with open(env_file_path, "r", encoding='utf-8') as f:
                     lines = f.readlines()
             except Exception as e:
                 logger.error(f"Не удалось прочитать .env файл {env_file_path}: {e}")
-                # Продолжаем, попытаемся перезаписать
-
-        # Записываем обновленный .env
         try:
             with open(env_file_path, "w", encoding='utf-8') as f:
                 for line in lines:
                     stripped_line = line.strip()
                     if stripped_line and not stripped_line.startswith('#') and stripped_line.startswith("HF_TOKEN="):
-                        f.write(f"HF_TOKEN={new_token}\n")
+                        f.write(f"HF_TOKEN={new_token}\n");
                         token_found = True
                     else:
-                        f.write(line)  # Сохраняем остальные строки
-                if not token_found:
-                    f.write(f"\nHF_TOKEN={new_token}\n")  # Добавляем, если не было
-
-            # Перезагружаем переменные окружения
+                        f.write(line)
+                if not token_found: f.write(f"\nHF_TOKEN={new_token}\n")
             load_dotenv(dotenv_path=env_file_path, override=True)
             global HF_TOKEN
             HF_TOKEN = os.getenv("HF_TOKEN")
-            # Обновляем токен и в model_manager, если он уже создан
-            if model_manager:
-                model_manager.hf_token = HF_TOKEN
-
+            if model_manager: model_manager.hf_token = HF_TOKEN
             logger.info(f"Токен HF_TOKEN успешно сохранен/обновлен в {env_file_path}")
             return {"message": "Токен успешно сохранен"}
-
         except Exception as e:
             logger.error(f"Ошибка записи в .env файл {env_file_path}: {e}")
             raise HTTPException(status_code=500, detail=f"Ошибка записи токена в файл конфигурации.")
-
     except Exception as e:
         logger.error(f"Общая ошибка при сохранении токена: {e}")
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при сохранении токена.")
 
 
-# --- Новые эндпоинты для управления чатами ---
-
-# Используем Pydantic модели для валидации данных API
 class ChatInfo(BaseModel):
     chat_id: str
     title: str
@@ -598,56 +518,48 @@ class ChatInfo(BaseModel):
 
 
 class MessageInfo(BaseModel):
-    message_id: int  # ID из БД
+    message_id: int
     sender: str
     content: str
     timestamp: datetime.datetime
 
 
-class ChatCreateResponse(ChatInfo):  # Ответ при создании содержит ту же информацию
+class ChatCreateResponse(ChatInfo):
     pass
 
 
 @router.get("/chats", response_model=List[ChatInfo])
 async def get_all_chats():
-    """Получает метаданные всех чатов, отсортированные по последнему изменению."""
     try:
         chats_data = db_get_chats()
-        return chats_data  # FastAPI автоматически обработает список словарей в List[ChatInfo]
+        return chats_data
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
-        logger.exception("Неожиданная ошибка в эндпоинте /chats (GET): {e}")
+        logger.exception(f"Неожиданная ошибка в эндпоинте /chats (GET): {e}")
         raise HTTPException(status_code=500, detail="Не удалось получить список чатов.")
 
 
 @router.post("/chats", response_model=ChatCreateResponse, status_code=201)
 async def create_new_chat():
-    """Создает новую сессию чата."""
     try:
         new_chat_id = str(uuid.uuid4())
-        # Название по умолчанию с временной меткой
         initial_title = f"New Chat {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         db_add_chat(chat_id=new_chat_id, title=initial_title)
-
-        # Получаем только что созданный чат, чтобы вернуть актуальные данные (включая время)
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT chat_id, title, model_used, last_modified_at FROM chats WHERE chat_id = ?",
                        (new_chat_id,))
         new_chat_data = cursor.fetchone()
         conn.close()
-
         if new_chat_data:
-            # Преобразуем last_modified_at в datetime для Pydantic
             chat_dict = dict(new_chat_data)
-            chat_dict['last_modified_at'] = datetime.datetime.fromisoformat(chat_dict['last_modified_at'])
+            if isinstance(chat_dict.get('last_modified_at'), str):
+                chat_dict['last_modified_at'] = datetime.datetime.fromisoformat(chat_dict['last_modified_at'])
             return chat_dict
         else:
-            # Этого не должно произойти, если db_add_chat отработал без ошибок
             logger.error(f"Не удалось найти только что созданный чат {new_chat_id} в БД.")
             raise HTTPException(status_code=500, detail="Ошибка получения данных нового чата.")
-
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
@@ -657,34 +569,27 @@ async def create_new_chat():
 
 @router.get("/chats/{chat_id}/messages", response_model=List[MessageInfo])
 async def get_chat_messages(chat_id: str):
-    """Получает все сообщения для указанного чата."""
     try:
         messages_data = db_get_messages(chat_id)
-        if messages_data is None:  # Если db_get_messages вернул None, чат не найден
+        if messages_data is None:
             raise HTTPException(status_code=404, detail=f"Чат с ID {chat_id} не найден.")
-        # Преобразуем строки времени в datetime объекты для Pydantic
-        for msg in messages_data:
-            msg['timestamp'] = datetime.datetime.fromisoformat(msg['timestamp'])
         return messages_data
     except HTTPException as http_exc:
-        raise http_exc  # Передаем 404 дальше
+        raise http_exc
     except Exception as e:
         logger.exception(f"Неожиданная ошибка получения сообщений для чата {chat_id}: {e}")
         raise HTTPException(status_code=500, detail="Не удалось получить сообщения чата.")
 
 
-@router.delete("/chats/{chat_id}", status_code=204)  # 204 No Content - стандартный ответ для успешного DELETE
+@router.delete("/chats/{chat_id}", status_code=204)
 async def delete_chat(chat_id: str):
-    """Удаляет чат и все связанные с ним сообщения."""
     try:
         success = db_delete_chat(chat_id)
         if not success:
-            # Если db_delete_chat вернул False, значит чат не был найден
             raise HTTPException(status_code=404, detail=f"Чат с ID {chat_id} не найден.")
-        # При успехе (status_code=204) тело ответа должно быть пустым
         return None
     except HTTPException as http_exc:
-        raise http_exc  # Передаем 404 и 500 от db_delete_chat дальше
+        raise http_exc
     except Exception as e:
         logger.exception(f"Неожиданная ошибка при удалении чата {chat_id}: {e}")
         raise HTTPException(status_code=500, detail="Не удалось удалить чат.")
