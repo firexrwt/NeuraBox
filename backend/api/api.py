@@ -11,7 +11,7 @@ import datetime
 import platformdirs
 import httpx
 
-from backend.model_manager import ModelManager
+from model_manager import ModelManager
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
